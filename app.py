@@ -1,147 +1,155 @@
 import streamlit as st
-import pyshark
 from collections import Counter
 import tempfile
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# Safe import for cloud deployment
+try:
+    import pyshark
+    PYSHARK_AVAILABLE = True
+except:
+    PYSHARK_AVAILABLE = False
+
 # Page config
-st.set_page_config(page_title=" Network Analyzer", layout="wide")
+st.set_page_config(page_title="Elite Network Analyzer", layout="wide")
 
 # Title
-st.title("🚀  Network Traffic Analyzer")
-st.markdown("Advanced analysis of network traffic with insights & anomaly detection")
+st.title("🚀 Elite Network Traffic Analyzer")
+st.markdown("Advanced packet analysis & anomaly detection dashboard")
+
+# Warning for cloud
+if not PYSHARK_AVAILABLE:
+    st.warning("⚠️ Packet analysis is disabled in cloud deployment. Run locally for full functionality.")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
-
 uploaded_files = st.sidebar.file_uploader(
-    "Upload Capture Files",
+    "Upload .pcap/.pcapng files",
     type=["pcap", "pcapng"],
     accept_multiple_files=True
 )
 
-threshold = st.sidebar.slider("Suspicious Traffic Threshold", 100, 1000, 200)
+threshold = st.sidebar.slider("Suspicious Threshold", 100, 1000, 200)
 
-# Helper
+# Helper function
 def is_local(ip):
     return ip.startswith("192.168.") or ip.startswith("10.") or ip.startswith("172.")
 
-# Store reports for comparison
-reports = []
+# Analysis function
+def analyze_file(file):
+    if not PYSHARK_AVAILABLE:
+        return None
 
-# Main logic
-if uploaded_files:
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    temp_file.write(file.read())
+    temp_file.close()
 
-    for uploaded_file in uploaded_files:
+    capture = pyshark.FileCapture(temp_file.name)
 
-        st.markdown("---")
-        st.header(f"📁 {uploaded_file.name}")
+    protocols = []
+    ips = []
+    dns_count = 0
 
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
-        temp_file.write(uploaded_file.read())
-        temp_file.close()
+    for packet in capture:
+        try:
+            if packet.transport_layer:
+                protocols.append(packet.transport_layer)
+            if hasattr(packet, 'ip'):
+                ips.append(packet.ip.src)
+            if 'DNS' in packet:
+                dns_count += 1
+        except:
+            continue
 
-        capture = pyshark.FileCapture(temp_file.name)
+    protocol_counter = Counter(protocols)
+    ip_counter = Counter(ips)
 
-        protocols = []
-        ips = []
-        dns_count = 0
+    top_protocol = protocol_counter.most_common(1)[0][0] if protocol_counter else "N/A"
+    top_ip = ip_counter.most_common(1)[0][0] if ip_counter else "N/A"
 
-        for packet in capture:
-            try:
-                if packet.transport_layer:
-                    protocols.append(packet.transport_layer)
-
-                if hasattr(packet, 'ip'):
-                    ips.append(packet.ip.src)
-
-                if 'DNS' in packet:
-                    dns_count += 1
-            except:
-                continue
-
-        protocol_counter = Counter(protocols)
-        ip_counter = Counter(ips)
-
-        top_protocol = protocol_counter.most_common(1)[0][0] if protocol_counter else "N/A"
-        top_ip = ip_counter.most_common(1)[0][0] if ip_counter else "N/A"
-
-        suspicious = "NO"
-        for ip, count in ip_counter.items():
-            if not is_local(ip) and count > threshold:
-                suspicious = "YES"
-
-        if dns_count > 300:
+    suspicious = "NO"
+    for ip, count in ip_counter.items():
+        if not is_local(ip) and count > threshold:
             suspicious = "YES"
 
-        # Status Indicator
-        status_color = "🟢 Normal" if suspicious == "NO" else "🔴 Suspicious"
+    if dns_count > 300:
+        suspicious = "YES"
 
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
+    return {
+        "top_ip": top_ip,
+        "protocol": top_protocol,
+        "dns": dns_count,
+        "suspicious": suspicious,
+        "protocols": protocol_counter,
+        "ips": ip_counter
+    }
 
-        col1.metric("Top IP", top_ip)
-        col2.metric("Protocol", top_protocol)
-        col3.metric("DNS Queries", dns_count)
-        col4.metric("Status", status_color)
+# Main app
+if uploaded_files:
 
-        # Charts
-        st.subheader("📊 Traffic Analysis")
+    if not PYSHARK_AVAILABLE:
+        st.error("❌ Packet analysis not supported in this environment.")
+        st.stop()
 
-        colA, colB = st.columns(2)
+    results = []
 
-        proto_df = pd.DataFrame(protocol_counter.items(), columns=["Protocol", "Count"])
-        ip_df = pd.DataFrame(ip_counter.most_common(5), columns=["IP", "Count"])
+    for file in uploaded_files:
+        result = analyze_file(file)
+        if result:
+            results.append((file.name, result))
+
+    # Comparison view
+    st.markdown("## ⚔️ File Comparison")
+
+    cols = st.columns(len(results))
+
+    for i, (name, res) in enumerate(results):
+        with cols[i]:
+            st.subheader(name)
+            st.metric("Top IP", res["top_ip"])
+            st.metric("Protocol", res["protocol"])
+            st.metric("DNS", res["dns"])
+            st.metric("Suspicious", res["suspicious"])
+
+    # Detailed view
+    for name, res in results:
+        st.markdown("---")
+        st.header(f"📁 Detailed Analysis: {name}")
+
+        col1, col2 = st.columns(2)
+
+        proto_df = pd.DataFrame(res["protocols"].items(), columns=["Protocol", "Count"])
+        ip_df = pd.DataFrame(res["ips"].most_common(5), columns=["IP", "Count"])
 
         if not proto_df.empty:
-            colA.bar_chart(proto_df.set_index("Protocol"))
+            col1.subheader("Protocol Distribution")
+            col1.bar_chart(proto_df.set_index("Protocol"))
 
         if not ip_df.empty:
-            colB.bar_chart(ip_df.set_index("IP"))
+            col2.subheader("Top Active IPs")
+            col2.bar_chart(ip_df.set_index("IP"))
 
-        # Pie Chart
+        # Pie chart
+        st.subheader("Protocol Share")
         if not proto_df.empty:
             fig, ax = plt.subplots()
             ax.pie(proto_df["Count"], labels=proto_df["Protocol"], autopct='%1.1f%%')
             st.pyplot(fig)
 
-        # Top Talkers Table
-        st.subheader("🌐 Top Talkers")
-        st.dataframe(ip_df)
-
-        # Save report
-        report = {
-            "File": uploaded_file.name,
-            "Top IP": top_ip,
-            "Protocol": top_protocol,
-            "DNS": dns_count,
-            "Suspicious": suspicious
-        }
-        reports.append(report)
-
-        # Download Report
-        report_text = f"""
-        File: {uploaded_file.name}
-        Top IP: {top_ip}
-        Protocol: {top_protocol}
-        DNS Queries: {dns_count}
-        Suspicious: {suspicious}
-        """
-
+        # Download report
+        report = f"""
+File: {name}
+Top IP: {res['top_ip']}
+Protocol: {res['protocol']}
+DNS Queries: {res['dns']}
+Suspicious: {res['suspicious']}
+"""
         st.download_button(
             label="📄 Download Report",
-            data=report_text,
-            file_name=f"{uploaded_file.name}_report.txt"
+            data=report,
+            file_name=f"{name}_report.txt"
         )
 
-    # Comparison Section
-    if len(reports) > 1:
-        st.markdown("---")
-        st.header("⚔️ Comparison View")
-
-        df = pd.DataFrame(reports)
-        st.dataframe(df)
-
 else:
-    st.info("👈 Upload capture files from the sidebar to start analysis")
+    st.info("👈 Upload files from sidebar to start analysis")
